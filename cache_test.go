@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"math/rand"
+	"strconv"
 	"testing"
 	"time"
 
@@ -8,7 +10,10 @@ import (
 )
 
 func TestCacheNoExpiry(t *testing.T) {
-	cache := NewCache(EXPIRE_NONE, 0, 0)
+	cache, err := NewCache(EXPIRE_NONE, 0, 0)
+	if err != nil {
+		t.Error(err)
+	}
 
 	first := cache.Get("1")
 	if first != nil {
@@ -51,7 +56,10 @@ func TestCacheNoExpiry(t *testing.T) {
 
 func TestCacheRigidExpiry(t *testing.T) {
 	logrus.SetLevel(logrus.DebugLevel)
-	cache := NewCache(EXPIRE_RIGID, 500*time.Millisecond, 2*time.Second)
+	cache, err := NewCache(EXPIRE_RIGID, 500*time.Millisecond, 2*time.Second)
+	if err != nil {
+		t.Error(err)
+	}
 
 	cache.Set("1", "Hello World", 2*time.Second)
 
@@ -70,7 +78,10 @@ func TestCacheRigidExpiry(t *testing.T) {
 
 func TestCacheFluidExpiry(t *testing.T) {
 	logrus.SetLevel(logrus.DebugLevel)
-	cache := NewCache(EXPIRE_FLUID, 500*time.Millisecond, 1*time.Second)
+	cache, err := NewCache(EXPIRE_FLUID, 500*time.Millisecond, 1*time.Second)
+	if err != nil {
+		t.Error(err)
+	}
 
 	cache.Set("1", "Hello World", 2*time.Second)
 	time.Sleep(1 * time.Second)
@@ -94,7 +105,10 @@ func TestCacheMap(t *testing.T) {
 	m[0] = 50
 	m[1] = 100
 
-	cache := NewCache(EXPIRE_NONE, 500*time.Millisecond, 2*time.Second)
+	cache, err := NewCache(EXPIRE_NONE, 500*time.Millisecond, 2*time.Second)
+	if err != nil {
+		t.Error(err)
+	}
 	cache.Set("map", m, NoExpiration)
 
 	recv := cache.Get("map")
@@ -108,5 +122,39 @@ func TestCacheMap(t *testing.T) {
 
 	if recvMap[1] != 100 {
 		t.Errorf("Incorrect values within received map %d: %d", 1, recvMap[1])
+	}
+}
+
+func BenchmarkCacheInserts(b *testing.B) {
+	b.Run("NoExpiry", func(b *testing.B) {
+		benchmarkCacheInsert(EXPIRE_NONE, 0, 0, 0, b)
+	})
+	b.Run("RigidExpiry-Consistent", func(b *testing.B) {
+		benchmarkCacheInsert(EXPIRE_RIGID, 40*time.Millisecond, 80*time.Millisecond, 60*time.Millisecond, b)
+	})
+	b.Run("RigidExpiry-Random", func(b *testing.B) {
+		benchmarkCacheInsert(EXPIRE_RIGID, 40*time.Millisecond, 80*time.Millisecond, -1, b)
+	})
+	b.Run("FluidExpiry-Consistent", func(b *testing.B) {
+		benchmarkCacheInsert(EXPIRE_FLUID, 40*time.Millisecond, 80*time.Millisecond, 60*time.Millisecond, b)
+	})
+	b.Run("FluidExpiry-Random", func(b *testing.B) {
+		benchmarkCacheInsert(EXPIRE_NONE, 40*time.Millisecond, 80*time.Millisecond, -1, b)
+	})
+}
+
+func benchmarkCacheInsert(mode CachingMode, cInterval, sInterval time.Duration, itemExp time.Duration, b *testing.B) {
+	cache, _ := NewCache(mode, cInterval, sInterval)
+	durations := make([]time.Duration, b.N)
+	for i := 0; i < b.N; i++ {
+		if itemExp > 0 {
+			durations[i] = itemExp
+		} else if itemExp == -1 {
+			durations[i] = time.Duration(rand.Intn(200)) * time.Millisecond
+		}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cache.Set(strconv.Itoa(i), i+2, durations[i])
 	}
 }
