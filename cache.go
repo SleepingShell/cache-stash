@@ -8,6 +8,7 @@
 package cache
 
 import (
+	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -27,11 +28,17 @@ type Cacher interface {
 	//GetExpiration returns when the given key expires, and a 0 time if the key doesn't exist
 	GetExpiration(key string) time.Time
 
+	//GetKeys returns all the keys currently stored
+	GetKeys() []string
+
 	//Exists return if a given key exists
 	Exists(key string) bool
 
 	//EvictExpired will evict any items that are expired and return the number evicted
 	EvictExpired() int
+
+	//Delete will delete the cache and all its contents
+	Delete()
 }
 
 //CachingMode specifies how items should expire or be evicted
@@ -146,6 +153,14 @@ func (c *Cache) GetExpiration(key string) time.Time {
 	return time.Unix(0, item.expiration)
 }
 
+func (c *Cache) GetKeys() []string {
+	var keys []string
+	for key, _ := range c.items {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
 //Exists returns if there is an entry for a key
 func (c *Cache) Exists(key string) bool {
 	c.mutex.RLock()
@@ -182,10 +197,9 @@ func (c *Cache) EvictExpired() int {
 		}
 	}
 	c.expTracker.mutex.Unlock()
-
-	//TODO: Problem is getting this lock, also need to fix locking in Set(). Should lock both mutexes in the same order across routines
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+
 	i := 0
 	for _, key := range toDelete {
 		actual, ok := c.items[key]
@@ -200,8 +214,15 @@ func (c *Cache) EvictExpired() int {
 	return i
 }
 
+//Delete delete the cache
+func (c *Cache) Delete() {
+	c.cleaner.C <- true
+	c.expTracker.DeleteArr()
+	c.items = nil
+}
+
 //NewCache returns a cache with the given mode
-func NewCache(mode CachingMode, cleanInterval, sortInterval time.Duration) *Cache {
+func NewCache(mode CachingMode, cleanInterval, sortInterval time.Duration) (*Cache, error) {
 	cache := Cache{
 		mode:       mode,
 		items:      make(map[string]*Item),
@@ -210,12 +231,15 @@ func NewCache(mode CachingMode, cleanInterval, sortInterval time.Duration) *Cach
 
 	if mode != EXPIRE_NONE {
 		//TODO: Check for 0 values
-		c := NewCleaner(cleanInterval, sortInterval, cache.expTracker.Sort)
+		c, err := NewCleaner(cleanInterval, sortInterval, cache.expTracker.Sort)
+		if err != nil {
+			return nil, err
+		}
 		cache.cleaner = &c
 		go cache.cleaner.Run(&cache)
 	}
 
-	return &cache
+	return &cache, nil
 }
 
 //ExpirationTracker provides a concurrent safe array of keys to expire. It will periodically
@@ -256,6 +280,10 @@ func (t *ExpirationTracker) Sort() {
 	//log.Debug("Sorted", len(t.arr))
 }
 
+func (t *ExpirationTracker) DeleteArr() {
+	t.arr = nil
+}
+
 //Len provides the length of the underlying array
 func (t *ExpirationTracker) Len() int {
 	return len(t.arr)
@@ -280,17 +308,21 @@ type Cleaner struct {
 
 	//Pass the function that should be called to sort the expiration array
 	Sort func()
+	C    chan bool
 }
 
 //NewCleaner returns a cleaner with the given intervals
 // cInterval - How often to clean (evict) the cache
 // sInterval - How often to sort the expiration tracker by calling s
-func NewCleaner(cInterval, sInterval time.Duration, s func()) Cleaner {
+func NewCleaner(cInterval, sInterval time.Duration, s func()) (Cleaner, error) {
+	if sInterval > 0 && s == nil {
+		return Cleaner{}, errors.New("Passed nil sorting function with non-zero sorting interval")
+	}
 	return Cleaner{
 		CleanInterval: cInterval,
 		SortInterval:  sInterval,
 		Sort:          s,
-	}
+	}, nil
 }
 
 //Run runs the cleaner rountine that will periodically clean the cache and sort the expiration
@@ -310,6 +342,8 @@ func (c Cleaner) Run(cache Cacher) {
 			log.WithField("Num", i).Debug("Evicted expired")
 		case <-sortTicker.C:
 			c.Sort()
+		case <-c.C:
+			break
 		}
 	}
 }
